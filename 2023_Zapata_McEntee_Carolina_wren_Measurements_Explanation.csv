@@ -1,0 +1,24 @@
+Measurement,Explanation
+Individual,Unique code for each birds
+Pair.ID,Unique number of territorial pair
+Treatment,"Playback treatment (D = Duets, FS = Female Solo, MS = Male Solo)"
+Sex,"Sex (Female, Male)"
+Order,"Slot in the playback sequence for a playback treatment (1, 2, 3)"
+Day.of.year,Julian day of 2022
+Time.of.day,Time of day
+Min.after.sunrise,Minutes passed after sunrise
+Latency,Latency to vocal or physical response
+Latency_corrected.time,Total time bird responded after correcting for the latency (180 s - Latency)
+Ptr.lat.cor,Total time bird responded after correcting for the latency (180 s - Latency) for partner
+Mate_Lat_ap_2m,Latency to approach within 2 meters of a loudspeaker
+Dif.dist,Difference in closest approach to each speaker (closest approach to female loudspeaker - closest approach to male loudspeaker) (m)
+ply.clos.app,Closest approach to a loudspeaker during playback
+Int.2m.any,"Approach within 2 m of a loudspeaker (0, 1)"
+playtime.2m.male,Time spent within male 2 m of a loudspeaker
+playtime.2m.female,Time spent within female 2 m of a loudspeaker
+Total.ply.time.2m,Time spent with any loudspeaker 
+N.ply.Duet.Created.,Number of duets created
+N.terr.playback,Number of songs/chatters 
+Ptr.vocal,Number of partner’s vocalizations
+ptr.voc.rate,Partner vocal rate
+prop.time.spent,Proportion of playback time spent within 2 m of a speaker (Total.ply.time.2m/Latency_corrected.time)
