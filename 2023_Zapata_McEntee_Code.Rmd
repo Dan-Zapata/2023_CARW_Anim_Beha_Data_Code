@@ -1,0 +1,766 @@
+---
+title: "BGLMMs for Thryothorus ludovicianus"
+author: "Danny"
+date: "2022-09-24"
+output: html_document
+---
+
+
+# General model set up
+```{r setup, include=FALSE}
+# Install all packages that will be necessary
+
+library(pacman)
+
+p_load(brms, ggplot2, DHARMa, emmeans, bayesplot, bayestestR, tidybayes, RColorBrewer, tidyverse, magrittr, dplyr, cowplot, gridExtra, ggpubr)
+
+# Let's load the data and scale predictors
+D <- read.csv("CARW_Zapata1.csv")
+D$Min.after.sunrise <- scale(D$Min.after.sunrise)
+D$Day.of.year <- scale(D$Day.of.year)
+D$Pair.ID <- as.factor(D$Pair.ID)
+D$Order <- scale(D$Order)
+
+# Create a column for partner vocal rate
+
+D$ptr.voc.rate <- scale(D$ptr.voc.rate)
+
+
+# Subset by sex 
+Mal <- D[which(D$Sex == "Male"),]
+Fem <- D[which(D$Sex == "Female"),]
+
+# Create a function to validate de model using the package DHARMa
+check_brms <- function(model,             
+                       integer = FALSE,   
+                       plot = TRUE,       
+                       ...                
+) {
+  mdata <- brms::standata(model)
+  if (!"Y" %in% names(mdata))
+    stop("Information cannot be extracted from this BLMM")
+  
+  dharma.obj <- DHARMa::createDHARMa(
+    simulatedResponse = t(brms::posterior_predict(model, ndraws = 1000)),
+    observedResponse = mdata$Y, 
+    fittedPredictedResponse = apply(
+      t(brms::posterior_epred(model, nsamples = 1000, re.form = NA)),
+      1,
+      mean),
+    integerResponse = integer)
+  
+  if (isTRUE(plot)) {
+    plot(dharma.obj, ...)
+  }
+  
+  invisible(dharma.obj)
+  
+}
+
+
+# Set weakly informative priors taking into account a plausible range of values for the coefficients
+
+prior <- c(prior(normal(0,2), class = b), 
+          prior(normal(0,2), class = Intercept))
+
+```
+
+
+# Sex-bias Score
+```{r setup, include=FALSE}
+
+# Create a variable with the difference in time spent with speaker 
+
+D$Dif.prop.time <- (D$playtime.2m.female-D$playtime.2m.male)/D$Latency_corrected.time
+
+# Erase rows with no data (pair that dissappread before doing the Male solo playback)
+
+D <- D[-c(38,41),] 
+
+
+# Prepare data for PCA using difference spent with each speaker and difference in closest approach to each speaker
+
+pcdata <- D[,c("Dif.dist", "Dif.prop.time")]
+
+# Perform PCA
+
+prc <- prcomp(pcdata, center=T, scale=T, retx=T)
+eigs <- prc$sdev^2 # Get eigenvalues
+eigs[1] / sum(eigs) #0.8018 Variation explained by PC1 (Sex-biased score)
+
+
+# Save scores for each observation and make it a data frame
+
+prc1 <- prc$x
+prc1frame <- as.data.frame(prc1)
+
+# take only pc1
+
+pc1 <- prc1frame$PC1
+
+# Adhere new column to dataset and give it a name
+
+D$sex.bias.score <- pc1
+
+# Center at 0, so all negative values imply stronger response to male speaker and positive values imply stronger response to female speaker
+
+D$sex.bias.score <- D$sex.bias.score -  0.11536074 # 0.11536074 is the value of PC1 when both the difference in closest approach and time spent with each speaker is 0
+
+# Run Bayesian Linear Mixed Model (BLMM) for sex-biased score
+
+sbc <- brm(sex.bias.score ~ 1 + Treatment + Sex + Treatment:Sex + Day.of.year + Order + Min.after.sunrise + (1|Pair.ID),
+               data = D, 
+               warmup = 20000, iter = 40000, 
+               cores = 2, chains = 4, prior = prior)
+
+# Check model summary
+
+summary(sbc, prob = 0.89)
+
+# Perform pairwise comparisons of each sex for each playback treatment
+
+pairs_sbc <- emmeans(sbc, specs = pairwise ~ Treatment:Sex)
+
+# Check conditional effects
+
+conditional_effects(sbc, conditions = data.frame(sex.bias.score = 1))
+
+# Now we check if the sex-biased responses follow are mainly towards same-sex speakers in the duet playback or if there is no preference (0).
+
+hypf2 <- hypothesis(sbc, "Intercept > 0", alpha = 0.055) #for females
+hypm2 <- hypothesis(sbc, "SexMale + Intercept < 0", alpha = 0.055) #for males
+
+# MODEL VALIDATION: Check the residual pattern is not deviated given the specified error distribution of the model
+
+check_brms(sbc, integer = F)
+
+# Posterior predictive checks
+
+pp_check(sbc, nsamples = 500) + xlim(0, 20)
+
+# Subset posteriors 
+
+pairs_me1 <- pairs_sbc$emmeans 
+
+# Subset constrasts
+
+sex_biased_score_contrasts <- pairs_sbc$contrasts 
+
+# Obtain indices of existence and significance
+
+describe_posterior(sex_biased_score_contrasts, ci = 0.89, test = c("p_direction", "p_significance", "rope"), rope_ci = 1)
+```
+
+# Intrusions within 2m 
+```{r}
+
+# Intrusions within 2 m of any speaker
+
+Int.2m <- brm(Int.2m.any ~ 1 + Treatment + Sex + Treatment:Sex + Order + Day.of.year + Min.after.sunrise + (1|Pair.ID),  
+                       data = D, 
+                       warmup = 20000, iter = 40000, 
+                       cores = 2, chains = 4, prior = prior,family = bernoulli())
+
+# Model summary
+
+summary(Int.2m, prob = 0.89)
+
+# Check residuals
+
+model.check <- check_brms(Int.2m, integer = T)
+
+# Perform pairwise comparisons of each sex for each treatment
+
+pairs_Int.2m <- emmeans(Int.2m, specs = pairwise ~ Treatment:Sex)
+
+## MODEL VALIDATION with plotting residuals, checking for patterns in the residuals
+
+model.check <- check_brms(Int.2m, integer = T)
+
+# Posterior predictive checks
+
+pp_check(Int.2m, nsamples = 1000) + xlim(0, 20)
+
+# Subset posterior distributions
+
+pairs_Int <- pairs_Int.2m$emmeans 
+
+# Subset posterior distributions
+
+ctrs_Int.2m<- pairs_Int.2m$contrasts # Subset contrasts
+subset_Int.2m  <- ctrs_Int.2m[c(1,2,6,13,14,15,3,8,12)]
+
+# Plot contrasts
+
+
+contrasts_2m <- subset_Int.2m %>% gather_emmeans_draws() %>% 
+  ggplot(mapping = aes(y = contrast, x = .value, fill = contrast)) + 
+  scale_y_discrete(limits = c("FS Male - MS Male", 
+                              "D Male - MS Male",
+                              "D Male - FS Male",
+                              "FS Female - MS Female",
+                              "D Female - MS Female",
+                              "D Female - FS Female",
+                              "MS Female - MS Male",
+                              "FS Female - FS Male",
+                              "D Female - D Male")) +
+  stat_halfeye(point_interval = median_hdi,
+               .width = c(0.89)) +
+  geom_vline(xintercept = 0, 
+             linetype = 2, color = "grey") +
+  geom_hline(yintercept = c(6.92), linetype = "solid", color = "black", size = 0.1) +
+scale_fill_manual(values = c("#CC99CC", "lightcoral", "lightcoral", "skyblue", "skyblue", "#CC99CC", "lightcoral", "skyblue", "#CC99CC")) + ylab("Contrasts") + xlab("Difference in log-odds intrusion") +
+  theme(legend.position="none") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+                                                                         panel.background = element_blank(), axis.line = element_line(colour = "grey"))
+
+# Plot posteriors
+mean_estimates_int2m <-  pairs_Int %>% gather_emmeans_draws() %>% 
+  ggplot(mapping = aes(y = Treatment, x = inv.logit(.value), fill = Sex, color = Sex)) + 
+  scale_y_discrete(limits = c("MS", "FS", "D")) +
+  scale_fill_manual(values = c("lightcoral", "skyblue")) +
+  stat_slab(alpha = .5) + stat_pointinterval(position = position_dodge(width = .5, preserve = "single"), .width = c(0.89, 0.89)) +
+  xlab("Probability of approach within 2 m") + ylab("Treatment") +
+  theme(legend.position="none") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "grey")) 
+
+ggarrange(mean_estimates_int2m, contrasts_2m,
+          ncol = 2, nrow = 1)
+
+# Obtain indices of existence and significance for contrasts
+ 
+describe_posterior(subset_ent2m, ci = 1, test = c("p_direction", "p_significance", "rope"), rope_ci = 1)
+
+```
+
+# Closest approach
+```{r}
+
+# Run model to broadcasting speaker
+cl.ap <- brm(ply.clos.app ~ 1 + Treatment + Sex + Sex:Treatment + Order + Day.of.year + Min.after.sunrise + (1|Pair.ID),
+             data = D, family = gen_extreme_value(), warmup = 20000, iter = 40000, cores = 2,
+             chains = 4, prior = prior, control = list(max_treedepth = 12))
+
+summary(cl.ap, prob = 0.89)
+
+# Check pairwise comparisons
+pairs_clo.apr <- emmeans(cl.ap, specs = pairwise ~ Treatment:Sex)
+
+# Subset posterior distributions
+
+
+clo.post <- pairs_clo.apr$emmeans
+
+# Subset contrasts
+
+cl.ap.contrasts <- pairs_clo.apr$contrasts
+
+# MODEL VALIDATION: check the residual pattern is not deviated given the specified error distribution of the model
+
+check_brms(clo.ap, integer = F)
+
+# Posterior predictive checks
+
+pp_check(clo.apr, nsamples = 1000) + xlim(0, 20)
+
+
+# Plot posterior distributions
+
+mean_estimates_cl <-  clo.post %>% gather_emmeans_draws() %>% 
+  ggplot(mapping = aes(y = Treatment, x = .value, fill = Sex, color = Sex)) + 
+  scale_y_discrete(limits = c("MS", "FS", "D")) +
+  scale_fill_manual(values = c("lightcoral", "skyblue")) +
+  stat_slab(alpha = .5, scale = 0.7) + stat_pointinterval(position = position_dodge(width = .5, preserve = "single"), .width = c(0.89, 0.89)) +
+  xlab("Closest approach (m)") + ylab("Treatment") +
+  theme(legend.position="none") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "grey")) 
+
+
+# Plot contrasts
+
+cl.ap.contrasts.plot <- cl.ap.contrasts  %>% gather_emmeans_draws() %>% 
+  ggplot(mapping = aes(y = contrast, x = .value, fill = contrast)) + 
+  scale_y_discrete(limits = c("FS Male - MS Male", 
+                              "D Male - MS Male",
+                              "D Male - FS Male",
+                              "FS Female - MS Female",
+                              "D Female - MS Female",
+                              "D Female - FS Female",
+                              "MS Female - MS Male",
+                              "FS Female - FS Male",
+                              "D Female - D Male")) +
+  stat_halfeye(point_interval = median_hdi,
+               .width = c(0.89)) +
+  geom_vline(xintercept = 0, 
+             linetype = 2, color = "grey") +
+  geom_hline(yintercept = c(6.92), linetype = "solid", color = "black", size = 0.1) +
+scale_fill_manual(values = c("#CC99CC", "lightcoral", "lightcoral", "skyblue", "skyblue", "#CC99CC", "lightcoral", "skyblue", "#CC99CC")) + ylab("Contrasts") + xlab("Difference in closest approach") +
+  theme(legend.position="none") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+                                                                         panel.background = element_blank(), axis.line = element_line(colour = "grey"))
+
+
+# Obtain indices of existence and significance
+ 
+describe_posterior(subset_clo, ci = 0.89, test = c("p_direction", "p_significance", "rope"), rope_ci = 1)
+
+```
+
+# Proportion of time within 2m
+```{r}
+
+# Calculate proportion of time spent with the speaker
+
+D$prop.time.spent <- D$Total.ply.time.2m/D$Latency_corrected.time
+
+# Model proportion of time spent with speaker
+
+Time.2m.cor <- brm(prop.time.spent ~ 1 + Treatment + Sex + Treatment:Sex + Order + Day.of.year + Min.after.sunrise + (1|Pair.ID), family = zero_inflated_beta(),  
+               data = D, 
+               warmup = 20000, iter = 40000, 
+               cores = 2, chains = 4, prior = prior, sample_prior = TRUE) 
+
+# Summary
+
+summary(Time.2m.cor, prob = 0.89)
+
+# Perform pairwise comparisons of each sex for each treatment
+
+ptime2m <- emmeans(Time.2m.cor, specs = pairwise ~ Treatment:Sex)
+
+## MODEL VALIDATION with plotting residuals, checking for patterns in the residuals
+
+model.check <- check_brms(Time.2m.cor, integer = F)
+
+# Posterior predictive checks
+
+pp_check(Time.2m.cor, nsamples = 1000) + xlim(0, 20)
+
+# Subset posterior distributions
+
+posts_time2m <- ptime2m$emmeans
+
+# Subset contrasts
+
+time2m.contrasts <- ptime2m$contrasts 
+
+# Plot posterior distributions 
+
+mean_prop_time <-  posts_time2m %>% gather_emmeans_draws() %>% 
+  ggplot(mapping = aes(y = Treatment, x = inv.logit(.value), fill = Sex, color = Sex)) + 
+  scale_y_discrete(limits = c("MS", "FS", "D")) +
+  scale_fill_manual(values = c("lightcoral", "skyblue")) +
+  stat_slab(alpha = .5, scale = 0.8) + stat_pointinterval(position = position_dodge(width = .5, preserve = "single"), .width = c(0.89, 0.89)) +
+  xlab("Proportion of time spent with speaker") + ylab("Treatment") +
+  theme(legend.position="none") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "grey")) 
+
+# Plot contrasts 
+
+ctr_time <- time2m.contrasts %>% gather_emmeans_draws() %>% 
+  ggplot(mapping = aes(y = contrast, x = .value, fill = contrast)) + 
+  scale_y_discrete(limits = c("FS Male - MS Male", 
+                              "D Male - MS Male",
+                              "D Male - FS Male",
+                              "FS Female - MS Female",
+                              "D Female - MS Female",
+                              "D Female - FS Female",
+                              "MS Female - MS Male",
+                              "FS Female - FS Male",
+                              "D Female - D Male")) +
+  stat_halfeye(point_interval = median_hdi,
+               .width = c(0.89)) +
+  geom_vline(xintercept = 0, 
+             linetype = 2, color = "grey") +
+  geom_hline(yintercept = c(6.86), linetype = "solid", color = "black", size = 0.1) + xlim(-2.2, 2.1) +
+scale_fill_manual(values = c("#CC99CC", "lightcoral", "lightcoral", "skyblue", "skyblue", "#CC99CC", "lightcoral", "skyblue", "#CC99CC")) + ylab("Contrasts") + xlab("Difference in time spent with speaker") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+                                                                         panel.background = element_blank(), axis.line = element_line(colour = "grey"), legend.position="none") 
+
+# Obtain indices of existence and significance
+
+describe_posterior(subset_time2, ci = 0.89, test = c("p_direction", "p_significance", "rope"), rope_ci = 1)
+```
+
+# Song rate
+```{r}
+# prior
+
+prior <- c(prior(normal(0,2), class = b),
+           prior(normal(0,2), class = Intercept))
+
+# We will add partner vocal rate as a predictor for separate models on females and males
+
+Fem <- D[which(D$Sex == "Female"),]
+Mal <- D[which(D$Sex == "Male"),]
+
+# Let's run model for females
+
+f.voc.rate <- brm(N.terr.playback|rate(Latency_corrected.time) ~ 1 + Treatment + ptr.voc.rate + Treatment:ptr.voc.rate + Order + Day.of.year + Min.after.sunrise + (1|Pair.ID),  
+                    data = Fem, family = negbinomial(),
+                    warmup = 20000, iter = 40000, control = list(adapt_delta = 0.95),
+                    cores = 2, chains = 4, sample_prior = TRUE, prior = prior)
+
+
+# Let's run it for males
+
+m.voc.rate <- brm(N.terr.playback|rate(Latency_correction.ply) ~ 1 + Treatment + ptr.voc.rate + Treatment:ptr.voc.rate + Order + Day.of.year + Min.after.sunrise + (1|Pair.ID),  
+                    data = Mal, family = negbinomial,
+                    warmup = 20000, iter = 40000, 
+                    cores = 2, chains = 4, sample_prior = TRUE, prior = prior)
+
+# Model check for females
+
+model.check <- check_brms(f.voc.rate, integer = F)
+
+# Model check for males
+
+model.check <- check_brms(m.voc.rate, integer = F)
+
+# Female pair-wise comparisons
+
+fvr <- emmeans(f.voc.rate, specs = pairwise ~ Treatment)
+
+# Male pair-wise comparisons
+
+mvr <- emmeans(m.voc.rate, specs = pairwise ~ Treatment)
+
+# Get female contrasts
+
+fvr_c <- fvr$contrasts # Subset contrasts
+
+# Male contrasts
+
+mvr_c <- mvr$contrasts
+
+# Female posteriors
+
+Fv_post <- fvr$emmeans 
+
+# Male posteriors
+
+Mv_post <- mvr$emmeans
+
+# Plot female posteriors for vocal rate
+
+# With transparency
+mean_estimates_fv <-  Fv_post %>% gather_emmeans_draws() %>% 
+  ggplot(mapping = aes(y = Treatment, x = inv.logit(.value), fill = "lightcoral", color = "lightcoral")) + 
+  scale_y_discrete(limits = c("MS", "FS", "D")) +
+  stat_slab(alpha = .5, scale = 0.7) + stat_pointinterval(position = position_dodge(width = .5, preserve = "single"), .width = c(0.89, 0.89)) +
+  xlab("Female vocal rate (chatters/second)") + ylab("Treatment") +
+  theme(legend.position="none") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "grey")) 
+
+# Without transparency
+
+mean_estimates_fv <- Fv_post %>% gather_emmeans_draws() %>% 
+    ggplot(mapping = aes(y = Treatment, x = exp(.value), fill = Treatment)) + 
+    scale_y_discrete(limits = c("MS",
+                                "FS",
+                                "D")) +
+    stat_halfeye(point_interval = median_hdi,
+                 .width = c(0.89)) +
+#    geom_vline(xintercept = 0, 
+#               linetype = 2, color = "grey") +
+    scale_fill_manual(values = c("lightcoral", "lightcoral", "lightcoral")) +
+    xlab("Female vocal rate (chatters/s)") + ylab("Treatment") +
+    xlim(0, 0.15) +
+    theme(legend.position="none") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "grey")) 
+
+contrasts_fV <- fvr_c %>% gather_emmeans_draws() %>% 
+  ggplot(mapping = aes(y = contrast, x = .value, fill = contrast)) + 
+  scale_y_discrete(limits = c("FS - MS",
+                              "D - MS",
+                              "D - FS")) +
+  stat_halfeye(point_interval = median_hdi,
+               .width = c(0.89)) +
+  geom_vline(xintercept = 0, 
+             linetype = 2, color = "grey") +
+  geom_hline(yintercept = c(6.92), linetype = "solid", color = "black", size = 0.1) +
+scale_fill_manual(values = c("lightcoral", "lightcoral", "lightcoral")) + ylab("Contrasts") + xlab("Diff in female vocal rate") +
+  theme(legend.position="none") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+                                                                         panel.background = element_blank(), axis.line = element_line(colour = "grey"))
+
+# Plot male contrasts
+
+mean_estimates_mv <-  Mv_post %>% gather_emmeans_draws() %>% 
+    ggplot(mapping = aes(y = Treatment, x = exp(.value), fill = Treatment)) + 
+    scale_y_discrete(limits = c("MS",
+                                "FS",
+                                "D")) +
+    stat_halfeye(point_interval = median_hdi,
+                 .width = c(0.89)) +
+#    geom_vline(xintercept = 0, 
+#               linetype = 2, color = "grey") +
+    scale_fill_manual(values = c("skyblue", "skyblue", "skyblue")) +
+    xlab("Male vocal rate (Songs/s)") + ylab("Treatment") +
+    xlim(0, 0.15) +
+    theme(legend.position="none") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "grey")) 
+
+
+contrasts_mv <- mvr_c %>% gather_emmeans_draws() %>% 
+  ggplot(mapping = aes(y = contrast, x = .value, fill = contrast)) + 
+  scale_y_discrete(limits = c("FS - MS",
+                              "D - MS",
+                              "D - FS")) +
+  stat_halfeye(point_interval = median_hdi,
+               .width = c(0.89)) +
+  geom_vline(xintercept = 0, 
+             linetype = 2, color = "grey") +
+  geom_hline(yintercept = c(6.92), linetype = "solid", color = "black", size = 0.1) +
+scale_fill_manual(values = c("skyblue", "skyblue", "skyblue")) + ylab("Contrasts") + xlab("Diff in male vocal rate") +
+  theme(legend.position="none") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+                                                                         panel.background = element_blank(), axis.line = element_line(colour = "grey"))
+
+ggarrange(mean_estimates_fv, contrasts_fV, mean_estimates_mv, contrasts_mv,
+          ncol = 2, nrow = 2)
+
+
+# Obtain indices of existence and significance
+ 
+describe_posterior(fvr_c , ci = 0.89, test = c("p_direction", "p_significance", "rope"), rope_ci = 1)
+
+describe_posterior(mvr_c , ci = 0.89, test = c("p_direction", "p_significance", "rope"), rope_ci = 1)
+
+
+# Here the same for a model with both sexes ####
+songRate<- brm(N.terr.playback|vint(Lat) ~ 1 + Treatment + Sex + Sex:Treatment + Order + Day.of.year + Min.after.sunrise + (1|Pair.ID),  
+                    data = Dm, family = beta_binomial2, stanvars = stanvars,
+                    warmup = 20000, iter = 40000, 
+                    cores = 2, chains = 4, sample_prior = TRUE, prior = prior)
+
+# Summary
+
+summary(SongRate, prob = 0.89)
+
+# Check pairwise comparisons
+SR <- emmeans(songRate, specs = pairwise ~ Treatment:Sex)
+
+# Check conditional effects
+conditional_effects(songRate, conditions = data.frame(N.terr.playback = 1))
+
+## MODEL VALIDATION with plotting residuals, checking for patterns in the residuals
+
+model.check <- check_brms(songRate, integer = T)
+
+# Now we perform a posterior predictive checking (if our observed data looks similar to simulated data generated from our data)
+
+pp_check(songRate, ndraws() = 1000) + xlim(0, 20)
+
+# Plot contrasts
+
+pairs_voc <- SR$contrasts # Subset contrasts
+subset_voc <- pairs_voc[c(1,2,6,13,14,15,3,8,12)] # Subset contrasts
+
+subset_voc %>% gather_emmeans_draws() %>% 
+  ggplot(mapping = aes(y = contrast, x = .value, fill = contrast)) + 
+  scale_y_discrete(limits = c("FS Male - MS Male", 
+                              "D Male - MS Male",
+                              "D Male - FS Male",
+                              "FS Female - MS Female",
+                              "D Female - MS Female",
+                              "D Female - FS Female",
+                              "MS Female - MS Male",
+                              "FS Female - FS Male",
+                              "D Female - D Male")) +
+  stat_halfeye(point_interval = mean_hdi,
+               .width = c(0.95)) +
+  geom_vline(xintercept = 0, 
+             linetype = 2, color = "grey") +
+  geom_hline(yintercept = c(6.86), linetype = "solid", color = "black", size = 0.1) +
+scale_fill_manual(values = c("#CC99CC", "lightcoral", "lightcoral", "skyblue", "skyblue", "#CC99CC", "lightcoral", "skyblue", "#CC99CC")) + ylab("Contrasts") + xlab("Difference in vocal rate") +
+  theme(legend.position="none") + theme(legend.position="none") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+                                                                         panel.background = element_blank(), axis.line = element_line(colour = "grey"))
+
+# Obtain indices of existence and significance
+ 
+describe_posterior(subset_voc, ci = 1, test = c("p_direction", "p_significance", "rope"), rope_ci = 1)
+```
+
+# Responsiveness 
+```{r pressure}
+
+# Define a custom distribution: beta binomial
+
+beta_binomial2 <- brms::custom_family(
+  "beta_binomial2", dpars = c("mu", "phi"),
+  links = c("logit", "log"),
+  lb = c(0, 0), ub = c(1, NA),
+  type = "int", vars = "vint1[n]")
+
+stan_funs <- "
+  real beta_binomial2_lpmf(int y, real mu, real phi, int T) {
+    return beta_binomial_lpmf(y | T, mu * phi, (1 - mu) * phi);
+  }
+int beta_binomial2_rng(real mu, real phi, int T) {
+  return beta_binomial_rng(T, mu * phi, (1 - mu) * phi);
+}
+"
+
+stanvars <- stanvar(scode = stan_funs, block = "functions")
+
+log_lik_beta_binomial2 <- function(i, prep) {
+  mu <- brms::get_dpar(prep, "mu", i = i)
+  phi <- brms::get_dpar(prep, "phi", i = i)
+  trials <- prep$data$vint1[i]
+  y <- prep$data$Y[i]
+  beta_binomial2_lpmf(y, mu, phi, trials)
+}
+posterior_predict_beta_binomial2 <- function(i, prep, ...) {
+  mu <- brms::get_dpar(prep, "mu", i = i)
+  phi <- brms::get_dpar(prep, "phi", i = i)
+  trials <- prep$data$vint1[i]
+  beta_binomial2_rng(mu, phi, trials)
+}
+
+posterior_epred_beta_binomial2 <- function(prep) {
+  mu <- brms::get_dpar(prep, "mu")
+  trials <- prep$data$vint1
+  trials <- matrix(trials, nrow = nrow(mu), ncol = ncol(mu), byrow = TRUE)
+  mu * trials
+}
+
+# Run it
+DuetFem <- brm(N.ply.Duet.Created.|vint(Ptr.vocal) ~ 1 + Treatment + Day.of.year + Order + Min.after.sunrise + ptr.voc.rate + (1|Pair.ID),     data = Fem, family = beta_binomial2, stanvars = stanvars,
+                 warmup = 20000, iter = 40000, 
+                 cores = 2, chains = 4, prior = prior, sample_prior = TRUE,  control = list(adapt_delta = 0.90))
+
+DuetMale <- brm(N.ply.Duet.Created.|vint(Ptr.vocal) ~ 1 + Treatment + Day.of.year + Order + Min.after.sunrise +
+                  ptr.voc.rate + (1|Pair.ID),     data = Mal, family = beta_binomial2, stanvars = stanvars,
+                 warmup = 20000, iter = 40000, 
+                 cores = 2, chains = 4, prior = prior, sample_prior = TRUE,  control = list(adapt_delta = 0.95))
+
+# Summary of both models
+
+summary(DuetFem, prb = 0.89)
+summary(DuetMale, prb = 0.89)
+
+# Perform pairwise comparisons for females and males
+
+DFem.cont <- emmeans(DuetFem, specs = pairwise ~ Treatment)
+
+DMale.cont <- emmeans(DuetMale, specs = pairwise ~ Treatment)
+
+# MODEL VALIDATION: Check the residual pattern is not deviated given the specified error distribution of the model
+
+expose_functions(DuetFem, vectorize = TRUE)
+expose_functions(DuetMale, vectorize = TRUE)
+
+check_brms(DuetFem, integer = F)
+check_brms(DuetMale, integer = F)
+
+# Perform posterior predictive checks
+
+expose_functions(DuetFem, vectorize = TRUE)
+expose_functions(DuetMale, vectorize = TRUE)
+
+pp_check(DuetFem , nsamples = 1000) + xlim(0, 20)
+pp_check(DuetMale, nsamples = 1000) + xlim(0, 20)
+
+# Subset posterior distributions
+
+pairs_fem <- DFem.cont$emmeans
+pairs_male <- DMale.cont$emmeans
+
+# Subset contrasts
+
+female_contrasts <- DFem.cont$contrasts 
+male_contrasts <- DMale.cont$contrasts 
+
+# Plot posterior distributions for females
+
+mean_estimates_fd <- pairs_fem %>% gather_emmeans_draws() %>% 
+    ggplot(mapping = aes(y = Treatment, x = inv.logit(.value), fill = Treatment)) + 
+    scale_y_discrete(limits = c("MS",
+                                "FS",
+                                "D")) +
+    stat_halfeye(point_interval = median_hdi,
+                 .width = c(0.89)) +
+#    geom_vline(xintercept = 0, 
+#               linetype = 2, color = "grey") +
+    scale_fill_manual(values = c("lightcoral", "lightcoral", "lightcoral")) +
+    xlab("Female duet responsiveness") + ylab("Treatment") +
+    xlim(0, 1) +
+    theme(legend.position="none") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "grey")) 
+
+# Plot posterior disitrbutions for males
+
+mean_estimates_md <-  pairs_male %>% gather_emmeans_draws() %>% 
+    ggplot(mapping = aes(y = Treatment, x = inv.logit(.value), fill = Treatment)) + 
+    scale_y_discrete(limits = c("MS",
+                                "FS",
+                                "D")) +
+    stat_halfeye(point_interval = median_hdi,
+                 .width = c(0.89)) +
+#    geom_vline(xintercept = 0, 
+#               linetype = 2, color = "grey") +
+    scale_fill_manual(values = c("skyblue", "skyblue", "skyblue")) +
+    xlab("Male duet responsiveness") + ylab("Treatment") +
+    xlim(0, 1) +
+    theme(legend.position="none") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "grey")) 
+
+
+# Plot female contrasts
+
+contrasts_fd <- female_contrasts %>% gather_emmeans_draws() %>% 
+  ggplot(mapping = aes(y = contrast, x = .value, fill = contrast)) + 
+  scale_y_discrete(limits = c("FS - MS",
+                              "D - MS",
+                              "D - FS")) +
+  stat_halfeye(point_interval = median_hdi,
+               .width = c(0.89)) +
+  geom_vline(xintercept = 0, 
+             linetype = 2, color = "grey") +
+  geom_hline(yintercept = c(6.92), linetype = "solid", color = "black", size = 0.1) +
+scale_fill_manual(values = c("lightcoral", "lightcoral", "lightcoral")) + ylab("Contrasts") + xlab("Difference in female duet responsiveness") +
+  theme(legend.position="none") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+                                                                         panel.background = element_blank(), axis.line = element_line(colour = "grey"))
+
+# Plot male contrasts
+
+contrasts_md <- male_contrasts %>% gather_emmeans_draws() %>% 
+  ggplot(mapping = aes(y = contrast, x = .value, fill = contrast)) + 
+  scale_y_discrete(limits = c("FS - MS",
+                              "D - MS",
+                              "D - FS")) +
+  stat_halfeye(point_interval = median_hdi,
+               .width = c(0.89)) +
+  geom_vline(xintercept = 0, 
+             linetype = 2, color = "grey") +
+  geom_hline(yintercept = c(6.92), linetype = "solid", color = "black", size = 0.1) +
+scale_fill_manual(values = c("skyblue", "skyblue", "skyblue")) + ylab("Contrasts") + xlab("Difference in male duet responsiveness") +
+  theme(legend.position="none") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+                                                                         panel.background = element_blank(), axis.line = element_line(colour = "grey"))
+
+
+# Obtain indices of existence and significance
+ 
+describe_posterior(female_contrasts, ci = 0.89, test = c("p_direction", "p_significance", "rope"), rope_ci = 1) #For females
+
+describe_posterior(male_contrasts, ci = 0.89, test = c("p_direction", "p_significance", "rope"), rope_ci = 1) #For males
+```
+
+# Manuscript figures
+``` {r}
+
+# Plot Figure 2
+
+mean_estimates_int2m <-  pairs_me1 %>% gather_emmeans_draws() %>% 
+  ggplot(mapping = aes(y = Treatment, x = .value, fill = Sex, color = Sex)) + 
+  scale_y_discrete(limits = c("MS", "FS", "D")) +
+  scale_fill_manual(values = c("lightcoral", "skyblue")) +
+  stat_slab(alpha = .5, scale = 0.78) + stat_pointinterval(position = position_dodge(width = .5, preserve = "single"), .width = c(0.89, 0.89)) +
+  xlab("Sex-biased score") + ylab("Treatment") +
+  theme(legend.position="none") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "grey")) +
+    geom_vline(xintercept = 0, 
+               linetype = 2, color = "grey")+ geom_segment(aes(x=-0.2, xend=-0.95, y=0.5, yend=0.5), arrow = arrow(length = unit(0.3, "cm")), color = "black", size = 1)+ geom_segment(aes(x=0.2, xend=0.98, y=0.5, yend=0.5), arrow = arrow(length = unit(0.3, "cm")), color = "black", size = 1) +
+    annotate("text", x = -0.55, y=0.57, label = "Male Speaker", size =4) + 
+    annotate("text", x = 0.55, y=0.57, label = "Female Speaker", size = 4)
+
+# Plot Figure 3
+
+ggarrange(mean_estimates_int2m, mean_estimates_cl, mean_prop_time,
+          ncol = 3, nrow = 1, labels = c("A", "B", "C"))
+
+#Plot Figure 4
+
+ggarrange(mean_estimates_fv, mean_estimates_fd, mean_estimates_mv, mean_estimates_md,
+          ncol = 2, nrow = 2, labels = c("A", "B", "C", "D"))
+
+
+```          
