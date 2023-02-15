@@ -1,6 +1,6 @@
 ---
 title: "BGLMMs for Thryothorus ludovicianus"
-author: "Danny"
+author: "ANONYMOUS"
 date: "2022-09-24"
 output: html_document
 ---
